@@ -1,0 +1,754 @@
+{
+    "metadata": {
+        "nome_projeto": "FTTH-OptiRoute-Urban",
+        "versao_arquitetura": "2.0",
+        "tipo_sistema": "GIS-Driven Network Optimization & Route Planning Platform",
+        "classificacao": "SaaS B2B Enterprise / Telecom Engineering Automation",
+        "status_arquitetural": "APPROVED_FOR_IMPLEMENTATION",
+        "data_analise": "2026-03-29",
+        "nivel_confianca": "HIGH",
+        "premissas_criticas": [
+            "Bases de dados espaciais da malha viária urbana e infraestrutura de postes/dutos disponíveis via OpenStreetMap, prefeituras ou distribuidoras de energia local.",
+            "Rede FTTH baseada em topologia GPON (Gigabit Passive Optical Network) centralizada ou distribuída (1:8 / 1:32 ou 1:2 / 1:16).",
+            "Processamento de grafos de alta densidade executado de forma assíncrona por workers desacoplados via filas de mensagens.",
+            "Uso obrigatório de projeções cartesianas planas métricas (UTM / SIRGAS 2000) durante os cálculos de distância e orçamento de cabo."
+        ]
+    },
+    "avaliacao_critica": {
+        "problema_original": "Planejar e otimizar manualmente o traçado de rotas de cabos ópticos (alimentadores e distribuição) e a localização de caixas de atendimento (CTOs/Splitters) para FTTH em ambientes urbanos gera alto CAPEX, desperdício de fibras, rotas subótimas e semanas de trabalho de engenharia.",
+        "objetivo_negocio": "Automatizar e otimizar o projeto de rede FTTH urbana, reduzindo o custo total de implantação (CAPEX) em até 22% através da minimização do comprimento total de cabos, otimização de localização de CTOs/CEO e redução do tempo de projeto de semanas para minutos.",
+        "diagnostico_tecnico": "O problema equivale a uma variação complexa do Capacitated Minimum Steiner Tree Problem (CMSTP) e Facility Location Problem (FLP) sobre grafos viários com restrições espaciais (capacidade de caixa, limites de atenuação óptica, impedâncias de vias e infraestrutura existente de postes). Uma abordagem ingênua por caminhos mínimos de Dijkstra individuais produz soluções fragmentadas e inviáveis economicamente.",
+        "pontos_fortes": [
+            "Amplo ecossistema Python para análise espacial (GeoPandas, Shapely 2.0, PyPROJ) e teoria dos grafos (NetworkX, Rustworkx).",
+            "Alta precisão na modelagem geográfica com PostGIS e índices espaciais GiST.",
+            "Capacidade de integração com ferramentas padrão de mercado como QGIS, AutoCAD (DXF) e bases OSMnx."
+        ],
+        "fragilidades": [
+            "Explosão combinatória (NP-hard) ao calcular Steiner Trees exatas em áreas urbanas com mais de 5.000 pontos de demanda (Home Passed).",
+            "Qualidade e descontinuidade dos dados de malha viária em bases públicas (desconexões de grafos viários).",
+            "Alto consumo de memória RAM se operações espaciais pesadas forem executadas sem indexação STRtree apropriada."
+        ],
+        "melhorias_recomendadas": [
+            "Decompor o problema em dois níveis: (1) Clusterização espacial capacitada de Home Passed (K-Medoids / Constrained DBSCAN) para definir CTOs; (2) Otimização de Steiner Tree aproximada sobre a malha viária para conectar OLT -> CEOs -> CTOs.",
+            "Utilizar 'Rustworkx' ou bindings em C++/Rust para aceleração computacional de grafos quando o limite do NetworkX for atingido.",
+            "Implementar pipeline de limpeza e topologização da rede viária (snapping de nós desconectados) no momento da ingestão."
+        ],
+        "tradeoffs": [
+            "Algoritmos Heurísticos/Metaheurísticos (Genetic Algorithms / Simulated Annealing) vs Solutores Exatos ILP (PuLP/CBC/OR-Tools): Adotada a abordagem Heurística/ILP Híbrida para garantir tempo de execução sub-minuto sacrificando < 2% de otimalidade matemática absoluta.",
+            "Processamento em Memória vs Carga Direta em Banco: Otimização de grafos é mantida totalmente em memória RAM nos Workers via Rustworkx/NetworkX, usando o PostGIS apenas para armazenamento e consultas de adjacência espacial preliminares."
+        ],
+        "viabilidade_tecnica": "ALTA. O ecossistema Python combinado com bibliotecas geoespaciais em C/C++ (GEOS, PROJ, GDAL) e solutores de otimização possui maturidade comprovada para resolver problemas geográfico-combinatórios complexos.",
+        "viabilidade_economica": "ALTA. A automação reduz o custo de engenharia de campo e reduz metros de cabo por assinante (Home Passed), resultando em ROI positivo no primeiro projeto de expansão urbana de médio porte (ex: 10.000 HPs).",
+        "lacunas_bloqueantes": [],
+        "informacoes_pendentes": [
+            "Definição da regra de negócios específica da concessionária local de energia sobre ocupação de postes (ex: limite de cabos por vão, taxa de aluguel por poste).",
+            "Parâmetros exatos da margem de segurança do orçamento de potência óptica (dBm) por fabricante de OLT/ONT."
+        ]
+    },
+    "requisitos": {
+        "funcionais": [
+            {
+                "id": "RF01",
+                "descricao": "Ingestão de polígono de área de cobertura urbana e importação de malha viária e postes via OSMnx ou arquivo GeoJSON/Shapefile.",
+                "prioridade": "MUST_HAVE",
+                "criterios_aceitacao": [
+                    "O sistema deve converter automaticamente geometrias geográficas (EPSG:4326) para a projeção plana UTM apropriada (EPSG:3198X/SIRGAS 2000).",
+                    "O sistema deve corrigir desconexões na malha viária até uma tolerância ajustável (ex: 2 metros)."
+                ]
+            },
+            {
+                "id": "RF02",
+                "descricao": "Geocodificação e identificação de pontos de demanda (Home Passed - HP) a partir de edificações/lotes.",
+                "prioridade": "MUST_HAVE",
+                "criterios_aceitacao": [
+                    "Cada ponto HP deve ser associado ao poste ou segmento de via mais próximo respeitando um raio máximo ajustável."
+                ]
+            },
+            {
+                "id": "RF03",
+                "descricao": "Algoritmo de alocação otimizada de Caixas de Terminacao Óptica (CTO/Splitter Secundário).",
+                "prioridade": "MUST_HAVE",
+                "criterios_aceitacao": [
+                    "Garantir que nenhuma CTO ultrapasse a capacidade de atendimento (ex: 8 ou 16 portas).",
+                    "Garantir que a distância do cabo Drop entre a CTO e o cliente não exceda 100 metros."
+                ]
+            },
+            {
+                "id": "RF04",
+                "descricao": "Otimização do traçado do cabo de distribuição e alimentação (Alimentador/Troncal) usando árvore geradora mínima capacitada (Steiner Tree).",
+                "prioridade": "MUST_HAVE",
+                "criterios_aceitacao": [
+                    "O traçado final deve utilizar prioritariamente a infraestrutura de postes disponível e vias permitidas.",
+                    "Minimizar a metragem total de cabo e evitar cruzamentos de vias desnecessários."
+                ]
+            },
+            {
+                "id": "RF05",
+                "descricao": "Validação de orçamento de potência óptica (Link Power Budget).",
+                "prioridade": "SHOULD_HAVE",
+                "criterios_aceitacao": [
+                    "Calcular a perda total de sinal (dB) desde a OLT até a ONT mais distante considerando fusões, conectores, atenuação do cabo por km e splitters.",
+                    "Emitir alerta visual se a perda exceder a sensibilidade da ONT (ex: -28 dBm)."
+                ]
+            },
+            {
+                "id": "RF06",
+                "descricao": "Exportação da engenharia de rede em formatos padrão (GeoJSON, DXF/AutoCAD, Shapefile e Lista de Materiais - BOM em XLSX/PDF).",
+                "prioridade": "MUST_HAVE",
+                "criterios_aceitacao": [
+                    "Gerar relatório detalhado com metragem por tipo de cabo (12FO, 36FO, 72FO, Drop), quantidade de CTOs, CEOs, reserva técnica e ferragens de sustentação."
+                ]
+            }
+        ],
+        "nao_funcionais": [
+            {
+                "id": "RNF01",
+                "categoria": "PERFORMANCE",
+                "requisito": "O tempo de processamento para otimização de um bairro de 5.000 HPs deve ser inferior a 120 segundos.",
+                "criterio_mensuravel": "Tempo total de execução do pipeline no worker < 120s no P95.",
+                "metodo_validacao": "Teste de carga e benchmark com datasets sintéticos e reais de 5.000 e 10.000 pontos."
+            },
+            {
+                "id": "RNF02",
+                "categoria": "PRECISION",
+                "requisito": "Precisão espacial métrica com erro de cálculo de distância inferior a 0,1%.",
+                "criterio_mensuravel": "Distância calculada vs distância real Euclidiana projetada em UTM.",
+                "metodo_validacao": "Validação cruzada de geometrias com PostGIS `ST_Distance` em projeções SIRGAS 2000."
+            },
+            {
+                "id": "RNF03",
+                "categoria": "SCALABILITY",
+                "requisito": "O sistema deve suportar múltiplas otimizações simultâneas através de escalamento horizontal de workers de processamento.",
+                "criterio_mensuravel": "Escalonamento linear de workers Celery via Kubernetes KEDA com base no tamanho da fila Redis.",
+                "metodo_validacao": "Simulação de 50 requisições simultâneas de otimização de rede."
+            }
+        ],
+        "regras_negocio": [
+            "RN01: Uma caixa CTO pode atender no máximo 8, 16 ou 24 clientes (configurável por projeto).",
+            "RN02: O cabo de drop óptico não deve exceder a distância linear de 120 metros do cliente até a CTO.",
+            "RN03: A taxa de ocupação máxima da fibra no alimentador não deve ultrapassar 80% para garantir reserva de expansão.",
+            "RN04: Splitters primários (ex: 1:8) e secundários (ex: 1:16) devem seguir o modelo GPON balanceado ou desbalanceado conforme parâmetro do projeto.",
+            "RN05: Travessias de vias arteriais exigem obrigatoriamente subida/descida em postes ancorados ou caixa subterrânea com reserva técnica de 30 metros."
+        ],
+        "restricoes": [
+            "RS01: A engine de otimização core deve ser desenvolvida em Python 3.12+ com código desacoplado da camada de interface.",
+            "RS02: Uso exclusivo de projeções cartográficas oficiais do Brasil (SIRGAS 2000 UTM Zonas 21S a 25S) para persistência e cálculo.",
+            "RS03: Não utilizar APIs pagas de terceiros para geocodificação ou roteamento (uso estrito de OSM e algoritmos próprios sobre PostGIS/Python)."
+        ],
+        "integracoes": [
+            "OpenStreetMap (OSMnx) para extração de malha viária e edifícios.",
+            "QGIS Desktop através de Plugin Customizado em PyQGIS consome a API REST do sistema.",
+            "PostgreSQL/PostGIS para armazenamento relacional e geográfico."
+        ]
+    },
+    "metodologia_dmaic": {
+        "definir": "Definir as métricas de sucesso da otimização: Redução do custo por HP passado (CAPEX/HP), minimização do comprimento total de cabos alimentadores e de distribuição, e redução do tempo de geração de projetos executivos FTTH.",
+        "medir": "Medir o comprimento total do traçado manual tradicional vs traçado gerado pelo sistema, quantidade de splitters alocados, perda de sinal média por trecho e tempo de processamento computacional.",
+        "analisar": "Analisar gargalos na topologia do grafo: identificar rotas viárias redundantes, regiões com baixa densidade de HPs que elevam o custo de fibra por cliente, e atrasos na resolução de Steiner Trees exatas.",
+        "melhorar": "Aplicar pipeline de otimização em 3 estágios: (1) Clusterização espacial K-Medoids restrita à capacidade da CTO; (2) Steiner Tree Heurística com aproximação de Mehlhorn/Kou para rede de distribuição; (3) Programação Linear Inteira (ILP) pontual para otimização da rota troncal da OLT.",
+        "controlar": "Estabelecer testes automatizados de regressão geográfica, monitorar desvios entre a rota projetada pelo software e o 'as-built' executado em campo pelas equipes de instalação via dashboard de observabilidade."
+    },
+    "arquitetura_proposta": {
+        "padrao": "Hexagonal Architecture (Ports and Adapters) com desacoplamento por Event-Driven Async Workers.",
+        "justificativa": "Isola o core de lógica de negócios e geoprocessamento matemático pesado de detalhes de infraestrutura (bancos de dados, frameworks web e brokers). Permite testar os algoritmos de otimização de forma totalmente unitária e escalonar o engine de computação de forma independente do servidor API.",
+        "alternativas_avaliadas": [
+            "Monólito síncrono FastAPI: Rejeitado devido ao risco de bloquear threads de I/O em cálculos espaciais CPU-bound longos.",
+            "Arquitetura de Microsserviços Granulares por Domínio GIS: Rejeitado nesta fase por introduzir latência de rede excessiva e complexidade desnecessária de serialização/deserialização de geometrias pesadas entre serviços."
+        ],
+        "componentes": [
+            {
+                "nome": "API Gateway & Management (FastAPI)",
+                "responsabilidade": "Autenticação, controle de acesso, upload de arquivos GIS, validação de requisições e exposição de endpoints REST/WebSocket.",
+                "tecnologia": "Python 3.12 / FastAPI / Pydantic v2",
+                "dependencias": [
+                    "Redis",
+                    "PostgreSQL"
+                ],
+                "interfaces": [
+                    "REST API",
+                    "WebSocket para progresso de otimização"
+                ]
+            },
+            {
+                "nome": "FTTH Route Optimization Engine (Worker)",
+                "responsabilidade": "Executar algoritmos de conversão de dados em grafos, clusterização de CTOs, cálculo de Steiner Tree capacitada, otimização de cabos e validação do orçamento de potência óptica.",
+                "tecnologia": "Python 3.12 / NetworkX / Rustworkx / Shapely 2.0 / GeoPandas / OR-Tools",
+                "dependencias": [
+                    "Redis Queue",
+                    "PostGIS"
+                ],
+                "interfaces": [
+                    "Celery Task Interface / AMQP"
+                ]
+            },
+            {
+                "nome": "Spatial Data Ingestion & Preprocessing Module",
+                "responsabilidade": "Download, limpeza, snapping de vértices, reprojecção cartográfica e topologização de malhas viárias e pontos de demanda.",
+                "tecnologia": "OSMnx / PyPROJ / GDAL / Shapely",
+                "dependencias": [
+                    "PostGIS"
+                ],
+                "interfaces": [
+                    "Python Internal Domain Port"
+                ]
+            },
+            {
+                "nome": "BOM & Engineering Report Generator",
+                "responsabilidade": "Calcular a lista detalhada de materiais (BOM), fusions, ferragens, metros de cabo e gerar relatórios executivos em DXF, GeoJSON e Excel.",
+                "tecnologia": "ezdxf / OpenPyXL / ReportLab",
+                "dependencias": [
+                    "Optimization Engine"
+                ],
+                "interfaces": [
+                    "File Exporter Ports"
+                ]
+            }
+        ],
+        "fluxo_operacional": [
+            "1. Usuário envia via REST/Web o polígono da área urbana (GeoJSON) e os parâmetros da rede (capacidade CTO, tipo de splitter, raio max drop).",
+            "2. API valida os dados, cria o registro do projeto no PostGIS com status 'PROCESSING' e enfileira uma tarefa no Redis.",
+            "3. Worker de Otimização consome a tarefa e executa a Ingestão Espacial: obtém vias e postes, executa limpeza topológica e reprojeta para UTM.",
+            "4. Worker executa o Módulo de Clusterização: Agrupa os HPs em clusters capacitados (máx 16 HPs) e posiciona as CTOs idealmente nos postes mais próximos.",
+            "5. Worker executa a Otimização de Grafo: Constrói o grafo viário ponderado (pesos por distância, tipo de via, facilidade de passagem) e resolve o problema de Steiner Tree Conectando OLT -> CEOs -> CTOs.",
+            "6. Worker executa o Motor de Validação Óptica: Verifica atenuação e ajusta dimensão de cabos (número de vias de fibra: 12FO, 36FO, 72FO).",
+            "7. Resultados são salvos no PostGIS, arquivos de saída (DXF/GeoJSON/BOM) são postos na Object Storage e o status do projeto é atualizado para 'COMPLETED'.",
+            "8. Frontend/QGIS recebe notificação via WebSocket e renderiza a solução otimizada na tela."
+        ],
+        "diagramas_necessarios": [
+            "Diagrama de Arquitetura Hexagonal (Core Domain, Ports & Adapters)",
+            "Diagrama de Sequência do Pipeline de Otimização Espacial",
+            "Diagrama de Entidade-Relacionamento Geográfico no PostGIS"
+        ],
+        "estrategia_evolucao": "Manter interfaces abstratas para o solutor de otimização, permitindo substituir o motor heurístico em Python por soluções em C++ ou solutores comerciais (Gurobi/CPLEX) no futuro sem alterar a camada da aplicação."
+    },
+    "stack_tecnologica": {
+        "linguagem": [
+            "Python 3.12+"
+        ],
+        "backend": [
+            "FastAPI",
+            "Pydantic v2",
+            "Celery",
+            "SQLAlchemy 2.0 (Async)"
+        ],
+        "frontend": [
+            "React",
+            "MapLibre GL JS",
+            "Deck.gl (renderização vetorial geográfica de alta performance)"
+        ],
+        "banco_dados": [
+            "PostgreSQL 16",
+            "PostGIS 3.4"
+        ],
+        "cache": [
+            "Redis 7.2 (Broker de mensageria e Cache Espacial)"
+        ],
+        "mensageria": [
+            "Redis Streams / RabbitMQ"
+        ],
+        "infraestrutura": [
+            "AWS S3 / MinIO (Armazenamento de Arquivos DXF/GeoJSON)",
+            "Docker",
+            "Kubernetes (EKS)"
+        ],
+        "devops": [
+            "GitHub Actions (CI/CD)",
+            "Helm",
+            "KEDA (Kubernetes Event-driven Autoscaling)"
+        ],
+        "observabilidade": [
+            "Prometheus",
+            "Grafana",
+            "OpenTelemetry",
+            "Sentry"
+        ],
+        "integracoes": [
+            "OSMnx",
+            "ezdxf",
+            "PyQGIS"
+        ],
+        "justificativa_tecnica": "A combinação Python 3.12 + GeoPandas/Shapely 2.0 (compilados sobre GEOS C++) oferece a melhor produtividade e performance para algoritmos espaciais complexos. O Rustworkx reduz drasticamente o overhead de memória e tempo de execução na manipulação de grafos pesados comparado ao NetworkX puro.",
+        "alternativas_descartadas": [
+            "Node.js/TypeScript no Backend: Descartado por ausência de ecossistema robusto de otimização combinatorial e geoprocessamento comparável ao Python.",
+            "Java/GeoTools: Descartado pela alta complexidade de desenvolvimento e consumo elevado de memória em ambiente containerizado para esse tipo de análise de grafos."
+        ]
+    },
+    "modelagem_dados": {
+        "modelo_conceitual": "Entidades espaciais parametrizadas em grafo (Vértices = Postes/Junções/Clientes/Splitters, Arestas = Segmentos de Via/Vãos de Cabo/Dutos) conectadas a entidades de domínio telecom.",
+        "entidades": [
+            {
+                "nome": "projects",
+                "atributos": [
+                    "id (UUID)",
+                    "name (Text)",
+                    "srid (Integer)",
+                    "status (Enum)",
+                    "created_at (Timestamp)"
+                ],
+                "tipo_geometria": "Polygon (Boundary da Área de Projeto)"
+            },
+            {
+                "nome": "demand_points_hp",
+                "atributos": [
+                    "id (UUID)",
+                    "project_id (FK)",
+                    "address (Text)",
+                    "hp_type (Enum: Residential, Commercial)",
+                    "assigned_cto_id (FK)"
+                ],
+                "tipo_geometria": "Point (EPSG:SIRGAS2000)"
+            },
+            {
+                "nome": "poles_infrastructure",
+                "atributos": [
+                    "id (UUID)",
+                    "project_id (FK)",
+                    "owner (Text)",
+                    "max_cables (Integer)",
+                    "is_available (Boolean)"
+                ],
+                "tipo_geometria": "Point (EPSG:SIRGAS2000)"
+            },
+            {
+                "nome": "cto_elements",
+                "atributos": [
+                    "id (UUID)",
+                    "project_id (FK)",
+                    "capacity_ports (Integer)",
+                    "splitter_ratio (Text)",
+                    "optical_loss_db (Float)"
+                ],
+                "tipo_geometria": "Point (EPSG:SIRGAS2000)"
+            },
+            {
+                "nome": "cable_segments",
+                "atributos": [
+                    "id (UUID)",
+                    "project_id (FK)",
+                    "cable_type (Enum: Feeder, Distribution, Drop)",
+                    "fiber_count (Integer)",
+                    "length_meters (Float)",
+                    "attenuation_loss_db (Float)"
+                ],
+                "tipo_geometria": "LineString (EPSG:SIRGAS2000)"
+            }
+        ],
+        "relacionamentos": [
+            "Project (1) -> (*) DemandPointsHP",
+            "Project (1) -> (*) PolesInfrastructure",
+            "Project (1) -> (*) CTOElements",
+            "CTOElement (1) -> (*) DemandPointsHP (Atendimento via Drop)",
+            "Project (1) -> (*) CableSegments (Malha de Fibra)"
+        ],
+        "restricoes_integridade": [
+            "Chave estrangeira obrigatória com exclusão em cascata parametrizada.",
+            "Garantia de que geometrias de `cable_segments` estejam contidas no envelope geográfico do `project`.",
+            "Restrição de unicidade no vínculo de HP para apenas uma CTO ativa por versão de projeto."
+        ],
+        "estrategia_persistencia": "PostgreSQL + PostGIS. As geometrias são salvas diretamente com SRID métrico específico do local (ex: SIRGAS 2000 / UTM zone 23S - EPSG 31983) com índices GiST para acelerar joins espaciais.",
+        "retencao": "Projetos ativos mantidos permanentemente no banco relacional; logs de processamento e arquivos intermediários mantidos por 90 dias.",
+        "backup": "Backups diários automatizados (WAL-G) com retenção de 30 dias em múltiplos data centers.",
+        "migracoes": "Gerenciadas rigorosamente via Alembic com suporte a comandos PostGIS (`op.execute('CREATE EXTENSION IF NOT EXISTS postgis;')`)."
+    },
+    "arquitetura_gis": {
+        "aplicavel": true,
+        "bibliotecas": [
+            "GeoPandas",
+            "Shapely 2.0",
+            "PyPROJ",
+            "OSMnx",
+            "Fiona",
+            "Rtree",
+            "Rustworkx"
+        ],
+        "fontes_geograficas": [
+            "OpenStreetMap (vias e footprints)",
+            "Base Vetorial da Prefeirura/Distribuidora local (Postes e Dutos)",
+            "MDT/DEM Altimetria (opcional para relevo)"
+        ],
+        "formatos": [
+            "GeoJSON",
+            "Shapefile",
+            "DXF",
+            "PostGIS Vector Tables"
+        ],
+        "crs_origem": [
+            "EPSG:4326 (WGS84 - Coordenadas Geográficas)"
+        ],
+        "crs_processamento": [
+            "EPSG:31981 a EPSG:31985 (SIRGAS 2000 / UTM Zones 21S a 25S conforme localização do município)"
+        ],
+        "crs_exportacao": [
+            "EPSG:4326 (GeoJSON para web)",
+            "EPSG Local UTM (DXF para engenharia/CAD)"
+        ],
+        "indices_espaciais": [
+            "PostGIS GiST em colunas de geometria",
+            "Shapely STRtree em memória durante a execução do algoritmo de otimização"
+        ],
+        "operacoes_espaciais": [
+            "ST_Snap / Shapely snap: Alinhamento de pontos de demanda com a malha viária e postes.",
+            "Spatial Join (STRtree): Encontro de infraestruturas mais próximas dentro de buffers restritos.",
+            "Network Shortest Path / Steiner Tree: Navegação no grafo de vias ponderado pela distância real."
+        ],
+        "validacao_geometrica": [
+            "Execução obrigatória de `make_valid` / `ST_MakeValid` para corrigir geometrias inválidas (auto-interseções).",
+            "Eliminação de vértices duplicados e segmentos de comprimento zero."
+        ],
+        "estrategia_processamento": "Chunking espacial: Em áreas muito grandes (> 15.000 HPs), o polígono do projeto é subdividido em sub-bairros usando diagramas de Voronoi ou agrupamento k-means espacial nos centroides de demanda, otimizando sub-grafos em paralelo e depois realizando o splicing da rede alimentadora troncal.",
+        "estrategia_raster": "Não se aplica primariamente, exceto para importação de modelos digitais de elevação (DEM) via Rasterio em áreas montanhosas para aplicar fator de correção de inclinação no comprimento do cabo.",
+        "estrategia_visualizacao": "Servidor vetorial tile-server (pg_tileserv) gerando MVT (Mapbox Vector Tiles) diretamente do PostGIS para o frontend em MapLibre GL JS / Deck.gl.",
+        "riscos_geoespaciais": [
+            "Incoerência de CRS entre bases de dados de fontes distintas gerando deslocamentos métricos (ex: WGS84 vs SAD69 vs SIRGAS 2000). Mitigação: Módulo rígido de reprojeção centralizada via PyPROJ.",
+            "Grafos desconectados no OpenStreetMap impedindo que o algoritmo encontre caminhos contínuos de fibra. Mitigação: Algoritmo de conexão de componentes desconectadas via arcos virtuais penalizados."
+        ]
+    },
+    "seguranca": {
+        "modelo_autenticacao": "OAuth2 com JWT (JSON Web Tokens) e suporte a Single Sign-On (SSO) via OIDC.",
+        "modelo_autorizacao": "RBAC (Role-Based Access Control) com escopos por empresa (Multi-Tenant): Admin, Engineer, Viewer.",
+        "gestao_segredos": "HashiCorp Vault ou AWS Secrets Manager para armazenamento seguro de credenciais de banco de dados e chaves API.",
+        "protecao_dados": "Criptografia TLS 1.3 em trânsito e AES-256 para dados armazenados no PostgreSQL e S3.",
+        "analise_ameacas": [
+            "Injeção de Código em arquivos CAD/GeoJSON importados: Mitigado por validação estrita do schema via Pydantic e parsing isolado sem execução de scripts.",
+            "Vazamento de dados estratégicos de infraestrutura de telecomunicações (infraestrutura crítica): Mitigado por isolamento multi-tenant lógico nos selects de banco (`tenant_id`)."
+        ],
+        "controles_necessarios": [
+            "Rate limiting na API via Redis (100 req/min por IP)",
+            "Sanitização de entradas GIS",
+            "Audit Log de modificações nos projetos de rede"
+        ],
+        "requisitos_lgpd": "Anonimização de dados de clientes finais associados aos HPs. A plataforma processa apenas geometrias e identificadores técnicos de imóveis, sem armazenar dados pessoais (PII) dos residentes.",
+        "riscos_residuais": "Possibilidade de exfiltração de mapas de infraestrutura corporativa por usuários legítimos comprometidos. Mitigado por marca d'água digital e logs de exportação de arquivos."
+    },
+    "performance_e_escalabilidade": {
+        "volume_estimado": "Atendimento a 50 consórcios/ISPs com processamento mensal de ~200.000 Home Passed.",
+        "concorrencia": "Até 50 otimizações simultâneas em execução no cluster de workers.",
+        "estrategia_cache": "Cache de malhas viárias e postes ingeridos por código IBGE de município no Redis para evitar downloads repetidos do OSMnx.",
+        "estrategia_processamento": "Aceleração algorítmica: Uso de `rustworkx` (escrito em Rust) para resolução rápida de caminhos mínimos e Steiner Tree aproximada, reduzindo o tempo de CPU em até 10x em comparação com `networkx` puramente interpretado.",
+        "complexidade_critica": [
+            "Steiner Tree Heurístico (Kou-Markowsky-Berman): O(|S| * (|V| log |V| + |E|)) onde S é o conjunto de CTOs/Terminais, V os vértices viários e E as arestas.",
+            "K-Medoids Espacial com Restrição de Capacidade: O(N * K * I) onde N é o número de HPs, K o número de CTOs e I as iterações."
+        ],
+        "gargalos_previstos": [
+            "Carga e construção da estrutura de dados de grafo em memória a partir de tabelas do PostGIS.",
+            "Geração do arquivo DXF final em projetos com mais de 20.000 elementos vetoriais."
+        ],
+        "estrategia_escalabilidade": "Escalonamento horizontal desatrelado: A camada Web/API escala baseada em uso de CPU/HTTP, e a camada de workers escala via KEDA monitorando a profundidade de filas no Redis/RabbitMQ.",
+        "estrategia_otimizacao": [
+            "Indexação com Shapely STRtree para consultas de raio (Nearest Neighbor) O(log N).",
+            "Vetorização de operações matemáticas com NumPy/Pandas durante a apuração do Link Power Budget.",
+            "Uso de pools de conexão assíncronos (`asyncpg`) no FastAPI."
+        ],
+        "benchmarks_necessarios": [
+            "Tempo de construção de grafo viário para área urbana de 10km².",
+            "Memory Footprint do worker Celery sob carga máxima (alocação de grafos com 100.000 nós)."
+        ]
+    },
+    "infraestrutura_operacional": {
+        "ambientes": [
+            "Development",
+            "Staging",
+            "Production"
+        ],
+        "estrategia_deploy": "Blue/Green Deployment para a API e Rolling Updates para os Workers de otimização.",
+        "containerizacao": "Imagens Docker multi-stage build otimizadas com Alpine/Debian-slim, pré-instalando bibliotecas C para GDAL/GEOS.",
+        "ci_cd": "GitHub Actions executando pipelines de Lint (Ruff), Type Checking (Mypy), Testes Unitários (Pytest), Validação de Schemas e Build/Push de Imagens no ECR.",
+        "monitoramento": "Prometheus coletando métricas de tempo de execução das tarefas Celery, taxa de sucesso de otimização e uso de memória.",
+        "logs": "Logs estruturados em JSON enviados via FluentBit para Grafana Loki.",
+        "metricas": [
+            "ftth_optimization_duration_seconds",
+            "ftth_cables_length_meters_total",
+            "celery_queue_length",
+            "worker_memory_usage_bytes"
+        ],
+        "backup_recuperacao": "Disaster Recovery automatizado com réplicas do banco PostgreSQL em zonas de disponibilidade distintas.",
+        "rto": "2 horas",
+        "rpo": "15 minutos"
+    },
+    "viabilidade_economica": {
+        "modelo_negocio": "SaaS B2B baseado em tarifação por consumo (R$ por Home Passed otimizado no projeto) ou assinatura mensal enterprise.",
+        "custos_desenvolvimento": "Equipe de 1 Principal Architect, 2 Senior Python Engineers (GIS/Graph Specialization), 1 Frontend Engineer, 1 DevOps Engineer por 6 meses.",
+        "custos_infraestrutura": "Estimado em US$ 800 - US$ 1.500/mês para cluster EKS gerenciado, PostGIS RDS gerenciado, Redis Elasticache e S3.",
+        "custos_licenciamento": "R$ 0 em licenças de software proprietário de GIS (uso de componentes 100% Open Source: PostGIS, Python GIS Stack, QGIS).",
+        "custos_integracoes": "Isento (uso de OpenStreetMap e bases públicas municipais).",
+        "tco": "Baixo TCO comparado a soluções proprietárias de planejamento FTTH (ex: Smallworld, Comarch), com redução de 80% nos custos de licenciamento por usuário.",
+        "premissas_financeiras": [
+            "Economia média de 8% a 15% na metragem de cabos de fibra por projeto de expansão.",
+            "Aumento da produtividade da equipe de engenharia de projetos em 500%."
+        ],
+        "riscos_financeiros": [
+            "Flutuação cambial nos custos de nuvem AWS/GCP (mitigável através de instâncias reservadas ou multi-cloud em providers nacionais se necessário)."
+        ]
+    },
+    "riscos_e_mitigacoes": [
+        {
+            "id": "RISK-01",
+            "categoria": "TECHNICAL",
+            "risco": "Explosão combinatória e OOM (Out of Memory) no worker ao tentar resolver Steiner Tree exata para cidades inteiras.",
+            "causa": "Complexidade NP-hard do problema CMSTP sobre grafos com dezenas de milhares de nós.",
+            "probabilidade": "HIGH",
+            "impacto": "HIGH",
+            "severidade": "CRITICAL",
+            "mitigacao": "Aplicar decomposição geográfica do problema (clustering de Voronoi/DBSCAN) para limitar os grafos a no máximo 3.000 nós por execução de Steiner Tree.",
+            "contingencia": "Fallback automático para algoritmo de Kruskal / Prim adaptado com penalização de distância se a otimização estourar o tempo limite de 90s."
+        },
+        {
+            "id": "RISK-02",
+            "categoria": "DATA",
+            "risco": "A malha viária extraída do OpenStreetMap possui descontinuidades (buracos/ruas que não se cruzam no grafo).",
+            "causa": "Mapeamento voluntário incompleto ou inconsistências na topologia de ruas da região.",
+            "probabilidade": "HIGH",
+            "impacto": "MEDIUM",
+            "severidade": "HIGH",
+            "mitigacao": "Implementar algoritmo de sanitização topológica que insere arestas virtuais com alto custo (penalidade) entre nós geograficamente próximos (< 15 metros) desconectados no grafo.",
+            "contingencia": "Permitir correção e desenho manual de conexões de vias no editor do frontend/QGIS com reprocessamento instantâneo."
+        },
+        {
+            "id": "RISK-03",
+            "categoria": "BUSINESS",
+            "risco": "As rotas otimizadas pelo algoritmo encontrarem impedimentos físicos no mundo real (ex: poste condenado, falta de espaço em duto).",
+            "causa": "Falta de atualização na base de dados de campo antes do projeto.",
+            "probabilidade": "MEDIUM",
+            "impacto": "MEDIUM",
+            "severidade": "MEDIUM",
+            "mitigacao": "Permitir marcar vias/postes como 'Bloqueados/Proibidos' no sistema, acionando uma re-otimização dinâmica das rotas contornando os bloqueios.",
+            "contingencia": "Recálculo de rotas em tempo real via plugin QGIS durante a vistoria de campo."
+        }
+    ],
+    "estrategia_testes": {
+        "unitarios": [
+            "Validação das funções de orçamento de potência óptica (cálculo de dBm).",
+            "Testes de conversão e re-projeção cartográfica de coordenadas isoladas (PyPROJ).",
+            "Validação das restrições de capacidade dos clusters de CTOs."
+        ],
+        "integracao": [
+            "Teste de ingestão completa de arquivo GeoJSON e persistência correta das geometrias nas tabelas PostGIS.",
+            "Teste da fila Celery garantindo a execução ponta a ponta do pipeline com mock de banco de dados."
+        ],
+        "contratos": [
+            "Validação dos contratos OpenAPI/Swagger gerados pelo FastAPI utilizando Schemathesis."
+        ],
+        "seguranca": [
+            "Análise estática de segurança com Bandit e Trivy na imagem Docker.",
+            "Validação de escopos RBAC e isolamento multi-tenant."
+        ],
+        "desempenho": [
+            "Benchmark do engine de otimização medindo o tempo de CPU e consumo de memória para 1.000, 5.000 e 20.000 HPs.",
+            "Testes de carga na API utilizando Locust."
+        ],
+        "regressao": [
+            "Comparação automatizada de métricas de projetos-modelo (metragem total de cabo gerada) entre versões do software para evitar degradação Heurística."
+        ],
+        "gis": [
+            "Validação topológica automatizada via Shapely (`is_valid`, `is_simple`).",
+            "Verificação de interseção entre linhas de cabo e polígonos de proibição."
+        ],
+        "criterios_aprovacao": [
+            "100% de aprovação nos testes unitários e de integração.",
+            "Tempo de otimização < 120s para o dataset de teste padrão de 5.000 HPs.",
+            "Zero geometrias inválidas geradas nas exportações GeoJSON e DXF."
+        ]
+    },
+    "planejamento_execucao": {
+        "fases": [
+            {
+                "fase": "Fase 1 - Core GIS & Foundation Engine",
+                "objetivo": "Construção do módulo de ingestão espacial, limpeza de malha viária e modelo de dados no PostGIS.",
+                "entregaveis": [
+                    "Pipeline de leitura OSM/GeoJSON",
+                    "Módulo de topologização de malha",
+                    "Data Model no PostGIS via Alembic"
+                ],
+                "dependencias": [],
+                "criterios_conclusao": [
+                    "Conversão perfeita de coordenadas e geração de grafos viários navegáveis no Rustworkx/NetworkX."
+                ]
+            },
+            {
+                "fase": "Fase 2 - Optimization Core & Domain Algorithms",
+                "objetivo": "Desenvolvimento dos algoritmos de clusterização de HPs/CTOs e Steiner Tree capacitada para lançamento de fibra.",
+                "entregaveis": [
+                    "Módulo CTO-Clusterer (K-Medoids)",
+                    "Módulo Fiber-Router (Steiner Tree)",
+                    "Calculadora de Link Power Budget"
+                ],
+                "dependencias": [
+                    "Fase 1 - Core GIS & Foundation Engine"
+                ],
+                "criterios_conclusao": [
+                    "Redução comprovada de no mínimo 10% de cabo versus traçados ingênuos de Dijkstra em datasets de validação."
+                ]
+            },
+            {
+                "fase": "Fase 3 - Async Architecture & API Layer",
+                "objetivo": "Encapsulamento do motor em FastAPI e Celery Workers com suporte a Redis.",
+                "entregaveis": [
+                    "API REST endpoints",
+                    "Worker Task Pipeline",
+                    "Integração S3/MinIO para exports"
+                ],
+                "dependencias": [
+                    "Fase 2 - Optimization Core & Domain Algorithms"
+                ],
+                "criterios_conclusao": [
+                    "Execução assíncrona estável com comunicação via WebSockets do progresso de otimização."
+                ]
+            },
+            {
+                "fase": "Fase 4 - Exporters & Integration Plug-ins",
+                "objetivo": "Geração da lista de materiais (BOM) e exportação para formatos de engenharia CAD/GIS e Plugin QGIS.",
+                "entregaveis": [
+                    "Exportador DXF/AutoCAD",
+                    "Gerador de relatórios Excel (BOM)",
+                    "Plugin QGIS em Python (PyQGIS)"
+                ],
+                "dependencias": [
+                    "Fase 3 - Async Architecture & API Layer"
+                ],
+                "criterios_conclusao": [
+                    "Abertura sem erros dos arquivos DXF no AutoCAD/QGIS com camadas (layers) corretas por tipo de cabo."
+                ]
+            }
+        ],
+        "backlog_tecnico": [
+            {
+                "id": "TASK-01",
+                "tarefa": "Implementar parser OSMnx e rotinas de Snap de pontos no Shapely 2.0",
+                "responsavel_agente": "Senior Data Engineer / GIS Solutions Architect",
+                "prioridade": "CRITICAL",
+                "dependencias": [],
+                "criterios_aceitacao": [
+                    "Função capaz de ler polígono e retornar MultiDiGraph do Rustworkx com comprimentos de aresta em metros."
+                ]
+            },
+            {
+                "id": "TASK-02",
+                "tarefa": "Desenvolver o algoritmo de clusterização capacitada de HPs em CTOs",
+                "responsavel_agente": "Principal Software Architect",
+                "prioridade": "CRITICAL",
+                "dependencias": [
+                    "TASK-01"
+                ],
+                "criterios_aceitacao": [
+                    "Garantir máximo de N HPs por CTO e raio máximo de drop < 120m em 100% dos casos."
+                ]
+            },
+            {
+                "id": "TASK-03",
+                "tarefa": "Implementar aproximação Heurística de Steiner Tree sobre o grafo viário",
+                "responsavel_agente": "Principal Software Architect",
+                "prioridade": "CRITICAL",
+                "dependencias": [
+                    "TASK-02"
+                ],
+                "criterios_aceitacao": [
+                    "Conectar todas as CTOs à OLT minimizando o custo total ponderado de arestas."
+                ]
+            },
+            {
+                "id": "TASK-04",
+                "tarefa": "Construir gerador de arquivos DXF estruturado por Layers de Engenharia",
+                "responsavel_agente": "Senior Software Engineer",
+                "prioridade": "HIGH",
+                "dependencias": [
+                    "TASK-03"
+                ],
+                "criterios_aceitacao": [
+                    "Arquivo DXF gerado com layers separadas: CABLE_FEEDER, CABLE_DISTRIBUTION, CTO_BOX, POLES."
+                ]
+            }
+        ],
+        "ordem_implementacao": [
+            "TASK-01: Ingestão e Grafo GIS",
+            "TASK-02: Clusterização CTOs",
+            "TASK-03: Roteamento de Fibra (Steiner Tree)",
+            "TASK-04: Exportador DXF e Relatórios"
+        ]
+    },
+    "decisoes_arquiteturais": [
+        {
+            "id": "ADR-01",
+            "contexto": "A resolução exata do problema de Steiner Tree com Capacidade sobre grafos grandes em Python puro via NetworkX é excessivamente lenta e consome muita memória.",
+            "decisao": "Utilizar a biblioteca `rustworkx` para estruturação de grafos e uma estratégia híbrida: clusterização espacial prévia para redução do tamanho do problema + heurística de Kou-Markowsky-Berman (KMB) para a árvore geradora de Steiner.",
+            "alternativas": [
+                "NetworkX Puro",
+                "Solutor ILP Comercial (Gurobi)",
+                "Dijkstra Individual por Ponto"
+            ],
+            "justificativa": "Rustworkx executa em Rust fornecendo ganhos de performance de ordem de grandeza sem abdicar da ergonomia do ecossistema Python. A heurística KMB possui garantia teórica de aproximação de 2*(1 - 1/L) em relação à solução ótima com complexidade O(N log N).",
+            "consequencias": [
+                "Diminuição drástica do tempo de computação de minutos para segundos.",
+                "Necessidade de compilação de binários Rust no container Docker."
+            ],
+            "tradeoffs": [
+                "Sacrifício irrisório (< 2%) de otimalidade matemática absoluta em troca de tempo de resposta interativo para o usuário."
+            ]
+        },
+        {
+            "id": "ADR-02",
+            "contexto": "Cálculo de distâncias geográficas precisa ser exato para determinar o orçamento de cabos de fibra e perdas ópticas.",
+            "decisao": "Proibir o uso de coordenadas geográficas puras (EPSG:4326 - Graus) em cálculos aritméticos de distância no core de otimização, exigindo a transformação prévia de todas as geometrias para a zona UTM local (SIRGAS 2000 métrico).",
+            "alternativas": [
+                "Uso da fórmula de Haversine em EPSG:4326",
+                "Projeção Web Mercator (EPSG:3857)"
+            ],
+            "justificativa": "A projeção UTM preserva distâncias e ângulos em áreas locais urbanas de pequeno/médio porte, permitindo operações Euclidianas rápidas em metros no Shapely/GEOS sem distorções de escala inerentes ao WGS84 ou Web Mercator.",
+            "consequencias": [
+                "Inclusão de módulo obrigatório de detecção de zona UTM com base na longitude central da área de projeto."
+            ],
+            "tradeoffs": [
+                "Ligeiro overhead de CPU no início e fim do pipeline para reprojeção de coordenadas (PyPROJ)."
+            ]
+        }
+    ],
+    "criterios_aprovacao": {
+        "requisitos": [
+            "Todas as funcionalidades de RF01 a RF06 cobertas e testadas.",
+            "Regras de negócio de capacidade de CTO e limite de drop rigorosamente validadas."
+        ],
+        "arquitetura": [
+            "Desacoplamento completo entre a API FastAPI e a engine de otimização.",
+            "Execução de tasks via Celery operando sem bloqueios no Event Loop principal."
+        ],
+        "seguranca": [
+            "Sanitização completa de geometrias e isolamento Multi-Tenant ativo.",
+            "Zero vulnerabilidades críticas ou de alta severidade no scanner de containers."
+        ],
+        "performance": [
+            "Tempo total de otimização para 5.000 HPs < 120 segundos.",
+            "Uso de memória RAM mantido abaixo de 2GB por worker Celery."
+        ],
+        "dados": [
+            "Schema PostGIS normalizado com índices espaciais GiST configurados.",
+            "Suporte nativo a SRIDs SIRGAS 2000 UTM."
+        ],
+        "testes": [
+            "Cobertura de código superior a 85% no módulo core de otimização espacial."
+        ],
+        "operacao": [
+            "Dashboards Grafana e métricas Prometheus expostas.",
+            "Pipelines de CI/CD executando testes e builds sem falhas."
+        ],
+        "documentacao": [
+            "Documentação OpenAPI/Swagger atualizada.",
+            "Guia de uso e especificação técnica das camadas CAD/DXF documentadas."
+        ]
+    },
+    "parecer_final": {
+        "status": "APPROVED",
+        "justificativa": "A arquitetura especificada resolve diretamente o problema combinatório e geoespacial de redes FTTH urbanas através de uma abordagem pragmática, modular e de altíssima performance. A escolha da stack Python com aceleração C++/Rust (Shapely/Rustworkx) e persistência relacional-espacial no PostGIS garante o equilíbrio ideal entre velocidade de desenvolvimento, escalabilidade operacional e custo zero de licenciamento GIS.",
+        "bloqueios": [],
+        "limitacoes": [
+            "O sistema pressupõe a existência de dados mínimos de malha viária (OSM ou vetor municipal); em locais com mapeamento urbano totalmente inexistente, será necessário o desenho vetorial prévio da malha de ruas."
+        ],
+        "condicoes_para_implementacao": [
+            "Garantir a instalação das bibliotecas C subjacentes (libgeos-dev, libproj-dev, libgdal-dev) na imagem Docker base.",
+            "Manter a parametrização das margens de segurança óptica e limites de cabo flexíveis via arquivos de configuração por projeto."
+        ],
+        "proximas_acoes": [
+            "Inicializar o repositório do projeto com a estrutura Hexagonal e setup do Docker Compose contendo PostgreSQL/PostGIS e Redis.",
+            "Implementar a suíte de testes do Módulo Ingestor GIS utilizando datasets de teste das cidades de São Paulo ou Rio de Janeiro (extraídos do OSM).",
+            "Desenvolver o protótipo do worker de otimização executando as tarefas `TASK-01` a `TASK-03`."
+        ]
+    }
+}
